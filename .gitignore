@@ -35,6 +35,7 @@ venv/
 
 # Python packaging artifacts
 build/
+dist/
 *.egg-info/
 
 # Local runtime state

@@ -1,18 +1,42 @@
 [project]
 name = "pocage"
 version = "0.1.0"
-description = "Pocket Agent local executor"
+description = "Pocket Agent local daemon for pairing your machine and continuing AI coding sessions from the browser."
+readme = "README.md"
 requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+  { name = "computbiol", email = "48988788+computbiol@users.noreply.github.com" },
+]
+keywords = ["pocage", "pocket-agent", "agent", "daemon", "acp", "codex"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS :: MacOS X",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development",
+]
 dependencies = [
   "agent-client-protocol>=0.8.1,<0.9",
   "websockets>=13.1",
 ]
 
+[project.urls]
+Homepage = "https://pocage.toce.ai"
+Repository = "https://github.com/computbiol/pocage"
+Issues = "https://github.com/computbiol/pocage/issues"
+
 [project.scripts]
 pocage = "pocage.main:main"
 
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77.0.3", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
