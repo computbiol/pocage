@@ -1,0 +1,24 @@
+[project]
+name = "pocage-backend"
+version = "0.1.0"
+description = "Pocket Agent backend API"
+requires-python = ">=3.11"
+dependencies = [
+  "agent-client-protocol>=0.8.1,<0.9",
+  "aiosqlite>=0.20.0",
+  "alembic>=1.13.0,<2",
+  "asyncpg>=0.29.0,<1",
+  "email-validator>=2.1.0,<3",
+  "fastapi>=0.116.0",
+  "fastapi-users>=13.0.0,<14",
+  "fastapi-users-db-sqlalchemy>=7.0.0,<8",
+  "pydantic-settings>=2.4.0,<3",
+  "PyJWT>=2.8.0,<3",
+  "sqlalchemy>=2.0.0,<3",
+  "uvicorn>=0.35.0",
+  "pydantic>=2.10.0",
+  "websockets>=13.1",
+]
+
+[tool.uv]
+package = false

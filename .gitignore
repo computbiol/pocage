@@ -1,0 +1,57 @@
+# OS and editors
+.DS_Store
+.idea/
+.vscode/
+
+# Browser automation artifacts
+.playwright-mcp/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+!.env.*.example
+.python-version
+
+# Frontend dependencies and build outputs
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+frontend/.cache/
+frontend/tsconfig.tsbuildinfo
+
+# Python environment and test caches
+.pixi/
+__pycache__/
+*.py[cod]
+*.pyc.*
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.venv/
+venv/
+
+# Python packaging artifacts
+build/
+*.egg-info/
+
+# Local runtime state
+logs/
+output/
+*.log
+*.pid
+
+# Local SQLite data
+data/
+frontend/data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Coverage reports
+coverage/
+htmlcov/

@@ -1,0 +1,19 @@
+[project]
+name = "pocage"
+version = "0.1.0"
+description = "Pocket Agent local executor"
+requires-python = ">=3.11"
+dependencies = [
+  "agent-client-protocol>=0.8.1,<0.9",
+  "websockets>=13.1",
+]
+
+[project.scripts]
+pocage = "pocage.main:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["pocage"]
