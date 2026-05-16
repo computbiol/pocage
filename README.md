@@ -5,7 +5,7 @@ pocage is a web control plane plus a local daemon. The web app manages auth, pai
 ## Component Docs
 
 - [Backend README](./backend/README.md)
-- [Connector README](./connector/pocage/README.md)
+- [Connector README](./connector/README.md)
 - [Frontend README](./frontend/README.md)
 
 ## Quick Start
@@ -76,7 +76,7 @@ React Frontend  --HTTP/REST + SSE-->  FastAPI Backend
 
 - `frontend`: presents the session list and chat UI, creates sessions, sends user messages, subscribes to run events, and handles permission decisions.
 - `backend`: exposes public APIs, indexes remote ACP sessions, keeps active run state in memory, streams run events via SSE, and dispatches queued runs to the selected connector.
-- `connector/pocage`: maintains the backend WebSocket connection, lists and creates ACP sessions, executes assigned runs through `codex-acp`, and relays streaming updates.
+- `connector`: the publishable Python project for the local daemon; its `pocage` package maintains the backend WebSocket connection, lists and creates ACP sessions, executes assigned runs through `codex-acp`, and relays streaming updates.
 - `codex-acp`: the session and prompting engine used by the connector.
 
 ## Core Concepts
@@ -125,7 +125,7 @@ Relationship summary:
 - Frontend -> Backend (SSE):
   - `GET /v1/runs/{run_id}/events`
 - Backend <-> Connector (WebSocket + bearer auth):
-  - endpoint: `/v1/executors/ws`
+  - endpoint: `/api/daemon/ws`
   - backend -> connector: `session.create.request`, `session.list.request`, `context.search.request`, `run.assign`, `run.cancel`, `run.permission.decision`
   - connector -> backend: `session.create.result`, `session.list.result`, `context.search.result`, `run.accepted`, `run.delta`, `run.tool`, `run.update`, `run.permission.requested`, `run.completed`, `run.failed`
 - Connector <-> codex-acp (JSON-RPC):
@@ -145,7 +145,7 @@ cp .env.local.example .env.local
 ```bash
 cd backend && uv sync
 cd ../frontend && npm install
-cd ../connector/pocage && uv sync
+cd ../connector && uv sync
 cd ../..
 npm install -g @zed-industries/codex-acp
 ```
@@ -183,7 +183,7 @@ Stop the host-side services with:
 5. Open `http://127.0.0.1:5173`, create a pairing code, then pair the daemon:
 
 ```bash
-cd connector/pocage
+cd connector
 uv run pocage pair --agent codex --api-url http://127.0.0.1:8000 --pairing-code <pairing-code>
 uv run pocage --agent codex
 ```

@@ -246,6 +246,6 @@ echo "logs:      $RUN_DIR"
 echo "pids:      $PID_DIR"
 echo
 echo "Next step for a local codex daemon:"
-echo "  cd '$ROOT_DIR/connector/pocage'"
+echo "  cd '$ROOT_DIR/connector'"
 echo "  uv run pocage pair --agent codex --api-url '$API_URL' --pairing-code <code-from-web>"
 echo "  uv run pocage --agent codex"

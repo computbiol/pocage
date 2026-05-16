@@ -1,6 +1,6 @@
 # Pocket Agent Connector
 
-`connector/pocage` is the publishable Python package for the Pocket Agent local daemon. It pairs with backend, connects over an authenticated WebSocket, talks to an ACP-compatible agent backend, and streams ACP updates back to backend. Today the only supported agent is `codex`.
+`connector/` is the publishable Python project for the Pocket Agent local daemon, and its `pocage` package contains the runtime code. It pairs with backend, connects over an authenticated WebSocket, talks to an ACP-compatible agent backend, and streams ACP updates back to backend. Today the only supported agent is `codex`.
 
 ## Environment
 
@@ -8,7 +8,7 @@ This module is managed as its own `uv` project. Keep its virtual environment iso
 
 ## Pair and Run
 
-Run from `connector/pocage/`:
+Run from `connector/`:
 
 ```bash
 uv sync
