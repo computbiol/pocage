@@ -2,12 +2,6 @@
 
 pocage is a web control plane plus a local daemon. The web app manages auth, pairing, sessions, and run orchestration. The local `pocage` daemon connects to that control plane and executes agent work on your machine.
 
-## Component Docs
-
-- [Backend README](./backend/README.md)
-- [Connector README](./connector/README.md)
-- [Frontend README](./frontend/README.md)
-
 ## Quick Start
 
 ### pocage Official Service
