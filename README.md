@@ -24,6 +24,8 @@ pocage --agent codex
 
 ### Self-Hosted Frontend and Backend
 
+Use this when you want to run the full stack locally in containers. For day-to-day code changes, prefer the host-side Local Development flow below.
+
 1. Create the Compose env file:
 
 ```bash
@@ -127,6 +129,8 @@ Relationship summary:
   - callbacks: `session/update`, `session/request_permission`
 
 ## Local Development
+
+This is the default workflow when you are changing code in this repository.
 
 1. Create the local development env file:
 
