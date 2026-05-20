@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import logging
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,7 +23,7 @@ from .daemon_auth import authenticate_machine_token, parse_bearer_token, require
 from .db import async_session_maker, get_async_session
 from .db_models import AgentInstance, Machine, User
 from .events import EventBroker, StreamEvent, format_sse
-from .executor_manager import ExecutorManager
+from .executor_manager import DaemonProtocolViolation, ExecutorManager
 from .models import (
     CancelRunResponse,
     ContextSearchItem,
@@ -131,14 +135,80 @@ def _require_owned_run(
     return run
 
 
+def _decode_daemon_message(raw_message: dict[str, object], *, max_bytes: int) -> tuple[dict[str, Any], int]:
+    message_type = raw_message.get("type")
+    if message_type == "websocket.disconnect":
+        raise WebSocketDisconnect(code=int(raw_message.get("code") or 1000), reason=str(raw_message.get("reason") or ""))
+    if message_type != "websocket.receive":
+        raise DaemonProtocolViolation("unexpected websocket message type")
+
+    text_payload = raw_message.get("text")
+    bytes_payload = raw_message.get("bytes")
+    if isinstance(text_payload, str):
+        encoded = text_payload.encode("utf-8")
+    elif isinstance(bytes_payload, bytes):
+        encoded = bytes_payload
+    else:
+        raise DaemonProtocolViolation("empty daemon websocket message")
+
+    if len(encoded) > max_bytes:
+        raise DaemonProtocolViolation(f"daemon message exceeded {max_bytes} bytes")
+
+    try:
+        payload = json.loads(encoded)
+    except json.JSONDecodeError as exc:
+        raise DaemonProtocolViolation("invalid daemon json payload") from exc
+    if not isinstance(payload, dict):
+        raise DaemonProtocolViolation("daemon payload must be a JSON object")
+    return payload, len(encoded)
+
+
+async def _runtime_cleanup_loop(runtime: RuntimeState, interval_seconds: int) -> None:
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            runtime.cleanup()
+        except Exception:
+            logger.exception("runtime cleanup failed")
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
+
+    runtime = RuntimeState(
+        max_events_per_run=settings.max_events_per_run,
+        max_event_payload_bytes=settings.max_event_payload_bytes,
+        completed_run_ttl_seconds=settings.completed_run_ttl_seconds,
+        max_local_runs_per_session=settings.max_local_runs_per_session,
+    )
+    broker = EventBroker(queue_maxsize=settings.run_event_subscriber_queue_size)
+    executors = ExecutorManager(
+        runtime,
+        broker,
+        async_session_maker,
+        max_session_update_bytes=settings.max_session_update_bytes,
+        max_run_stream_bytes=settings.max_run_stream_bytes,
+        max_session_sync_bytes=settings.max_session_sync_bytes,
+    )
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        cleanup_task = asyncio.create_task(
+            _runtime_cleanup_loop(runtime, settings.runtime_cleanup_interval_seconds)
+        )
+        try:
+            yield
+        finally:
+            cleanup_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await cleanup_task
 
     app = FastAPI(
         title=settings.app_name,
         version="0.1.0",
         docs_url=f"{settings.api_prefix}/docs",
         openapi_url=f"{settings.api_prefix}/openapi.json",
+        lifespan=lifespan,
     )
     app.add_middleware(
         CORSMiddleware,
@@ -147,10 +217,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-
-    runtime = RuntimeState()
-    broker = EventBroker()
-    executors = ExecutorManager(runtime, broker, async_session_maker)
 
     app.state.settings = settings
     app.state.runtime = runtime
@@ -563,7 +629,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         session = None
         try:
-            hello_payload = await websocket.receive_json()
+            hello_payload, _ = _decode_daemon_message(
+                await websocket.receive(),
+                max_bytes=settings.max_daemon_message_bytes,
+            )
             hello = DaemonHello(**hello_payload)
             require_matching_agent_instance(
                 hello.agent_instance_id,
@@ -582,21 +651,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return
 
             while True:
-                payload = await websocket.receive_json()
-                if not isinstance(payload, dict):
-                    continue
+                payload, payload_size = _decode_daemon_message(
+                    await websocket.receive(),
+                    max_bytes=settings.max_daemon_message_bytes,
+                )
                 try:
-                    await executors.handle_executor_event(session, payload)
-                except Exception:
-                    logger.exception(
-                        "daemon event handling failed: agent_instance_id=%s daemon_id=%s event_type=%s payload=%r",
+                    await executors.handle_executor_event(session, payload, raw_message_bytes=payload_size)
+                except DaemonProtocolViolation as exc:
+                    logger.warning(
+                        "daemon protocol violation: agent_instance_id=%s daemon_id=%s event_type=%s run_id=%s size_bytes=%s reason=%s",
                         session.agent_instance_id,
                         session.daemon_id,
                         payload.get("type"),
-                        payload,
+                        payload.get("run_id"),
+                        payload_size,
+                        str(exc),
+                    )
+                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason=str(exc))
+                    return
+                except Exception:
+                    logger.exception(
+                        "daemon event handling failed: agent_instance_id=%s daemon_id=%s event_type=%s run_id=%s size_bytes=%s",
+                        session.agent_instance_id,
+                        session.daemon_id,
+                        payload.get("type"),
+                        payload.get("run_id"),
+                        payload_size,
                     )
         except WebSocketDisconnect:
             pass
+        except DaemonProtocolViolation as exc:
+            try:
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason=str(exc))
+            except Exception:
+                pass
         except HTTPException as exc:
             try:
                 await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason=policy_violation_reason(exc))

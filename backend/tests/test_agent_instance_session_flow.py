@@ -5,8 +5,15 @@ import json
 import unittest
 from types import SimpleNamespace
 
+from app.auth_api import get_current_user, get_optional_current_user
+from app.db import get_async_session
 from app.main import create_app
 from app.runtime_state import RuntimeState
+
+
+class _FakeDbSession:
+    async def scalars(self, _statement) -> list[str]:
+        return ["agent-1"]
 
 
 class _FakeExecutors:
@@ -57,8 +64,19 @@ class AgentInstanceSessionFlowTests(unittest.TestCase):
     def setUp(self) -> None:
         self.app = create_app()
         self.fake_executors = _FakeExecutors()
+        self.fake_db_session = _FakeDbSession()
         self.app.state.executors = self.fake_executors
         self.app.state.runtime = RuntimeState()
+        self.app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="user-1")
+        self.app.dependency_overrides[get_optional_current_user] = lambda: SimpleNamespace(id="user-1")
+
+        async def override_async_session():
+            yield self.fake_db_session
+
+        self.app.dependency_overrides[get_async_session] = override_async_session
+
+    def tearDown(self) -> None:
+        self.app.dependency_overrides.clear()
 
     def request(self, method: str, path: str, body: dict | None = None) -> tuple[int, bytes]:
         payload = b""

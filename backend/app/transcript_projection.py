@@ -98,6 +98,17 @@ def _step_from_update(update: Any, raw_update: dict[str, Any], event: dict[str, 
     event_id = str(event.get("event_id") or f"{event.get('run_id', 'run')}-{event.get('seq', 0)}")
     session_update = raw_update.get("sessionUpdate")
 
+    if raw_update.get("truncated") is True:
+        label = session_update if isinstance(session_update, str) and session_update else "session_update"
+        return {
+            "step_id": event_id,
+            "summary": f"Update truncated: {label}",
+            "detail": None,
+            "created_at": created_at,
+            "session_update": label,
+            "data": raw_update,
+        }
+
     if isinstance(update, (AgentMessageChunk, AgentThoughtChunk, UserMessageChunk, UsageUpdate)):
         return None
 

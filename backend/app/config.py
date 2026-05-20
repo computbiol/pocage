@@ -145,6 +145,16 @@ class Settings(BaseSettings):
     host: str = Field(default="0.0.0.0", alias="POCAGE_HOST")
     port: int = Field(default=8000, alias="POCAGE_PORT")
     cors_origins_raw: str = Field(default="*", alias="POCAGE_CORS_ORIGINS")
+    max_events_per_run: int = 2000
+    max_event_payload_bytes: int = 256_000
+    completed_run_ttl_seconds: int = 6 * 3600
+    max_local_runs_per_session: int = 20
+    runtime_cleanup_interval_seconds: int = 300
+    run_event_subscriber_queue_size: int = 1000
+    max_daemon_message_bytes: int = 512_000
+    max_session_update_bytes: int = 256_000
+    max_run_stream_bytes: int = 8_000_000
+    max_session_sync_bytes: int = 4_000_000
 
     @model_validator(mode="after")
     def normalize_local_dev_values(self) -> "Settings":
@@ -153,6 +163,24 @@ class Settings(BaseSettings):
             raise ValueError("SMTP_USE_SSL and SMTP_USE_STARTTLS cannot both be enabled.")
         if self.smtp_host and self.smtp_port == 465 and not self.smtp_use_ssl:
             raise ValueError("SMTP port 465 requires SMTP_USE_SSL=true and SMTP_USE_STARTTLS=false.")
+        if self.max_events_per_run < 1:
+            raise ValueError("MAX_EVENTS_PER_RUN must be at least 1.")
+        if self.max_event_payload_bytes < 1024:
+            raise ValueError("MAX_EVENT_PAYLOAD_BYTES must be at least 1024.")
+        if self.completed_run_ttl_seconds < 1:
+            raise ValueError("COMPLETED_RUN_TTL_SECONDS must be at least 1.")
+        if self.max_local_runs_per_session < 1:
+            raise ValueError("MAX_LOCAL_RUNS_PER_SESSION must be at least 1.")
+        if self.runtime_cleanup_interval_seconds < 1:
+            raise ValueError("RUNTIME_CLEANUP_INTERVAL_SECONDS must be at least 1.")
+        if self.run_event_subscriber_queue_size < 1:
+            raise ValueError("RUN_EVENT_SUBSCRIBER_QUEUE_SIZE must be at least 1.")
+        if self.max_daemon_message_bytes < self.max_session_update_bytes:
+            raise ValueError("MAX_DAEMON_MESSAGE_BYTES must be greater than or equal to MAX_SESSION_UPDATE_BYTES.")
+        if self.max_session_sync_bytes < self.max_event_payload_bytes:
+            raise ValueError("MAX_SESSION_SYNC_BYTES must be greater than or equal to MAX_EVENT_PAYLOAD_BYTES.")
+        if self.max_run_stream_bytes < self.max_daemon_message_bytes:
+            raise ValueError("MAX_RUN_STREAM_BYTES must be greater than or equal to MAX_DAEMON_MESSAGE_BYTES.")
         return self
 
     @property

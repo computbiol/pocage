@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import threading
 import uuid
 import contextlib
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Iterable
 
 from .transcript_projection import build_run_transcript_items, build_synced_session_transcript_items
@@ -13,6 +14,7 @@ from .transcript_projection import build_run_transcript_items, build_synced_sess
 
 ACTIVE_RUN_STATUSES = {"queued", "assigned", "running"}
 TERMINAL_RUN_STATUSES = {"completed", "cancelled", "failed", "executor_disconnected"}
+TRUNCATABLE_EVENT_TYPES = {"run.session_update"}
 
 
 def utc_now() -> str:
@@ -36,6 +38,98 @@ def _parse_timestamp(value: str | None) -> datetime:
 def _display_title(title: str | None) -> str:
     text = (title or "").strip()
     return text or "New session"
+
+
+def _json_size_bytes(value: Any) -> int:
+    try:
+        return len(json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
+    except Exception:
+        return len(str(value).encode("utf-8", errors="replace"))
+
+
+def _truncate_text(value: str, limit: int = 512) -> str:
+    if len(value) <= limit:
+        return value
+    return f"{value[: limit - 3]}..."
+
+
+def _coerce_scalar(value: Any) -> str | int | float | bool | None:
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    if isinstance(value, str):
+        return _truncate_text(value)
+    return None
+
+
+def _fit_payload_within_limit(
+    event_type: str,
+    payload: dict[str, Any],
+    *,
+    max_payload_bytes: int,
+    original_size_bytes: int,
+) -> dict[str, Any]:
+    candidate = dict(payload)
+    if _json_size_bytes(candidate) <= max_payload_bytes:
+        return candidate
+
+    summary = {
+        "truncated": True,
+        "original_size_bytes": original_size_bytes,
+        "summary": f"{event_type} payload omitted",
+    }
+    for key in ("run_id", "session_id", "approval_id", "decision", "option_id", "stop_reason", "error_code"):
+        if key not in candidate:
+            continue
+        scalar = _coerce_scalar(candidate.get(key))
+        if scalar is not None or candidate.get(key) is None:
+            summary[key] = scalar
+    error_message = candidate.get("error_message")
+    if isinstance(error_message, str) and error_message:
+        summary["error_message"] = _truncate_text(error_message)
+
+    if _json_size_bytes(summary) <= max_payload_bytes:
+        return summary
+    return {
+        "truncated": True,
+        "original_size_bytes": original_size_bytes,
+    }
+
+
+def _truncate_session_update_payload(
+    payload: dict[str, Any],
+    *,
+    max_payload_bytes: int,
+    original_size_bytes: int,
+) -> dict[str, Any]:
+    raw_update = payload.get("update")
+    update_summary: dict[str, Any] = {"sessionUpdate": "truncated_update"}
+    if isinstance(raw_update, dict):
+        session_update = raw_update.get("sessionUpdate") or raw_update.get("session_update")
+        if isinstance(session_update, str) and session_update.strip():
+            update_summary["sessionUpdate"] = session_update.strip()
+        for key in ("toolCallId", "tool_call_id", "toolName", "tool_name", "title", "status", "messageId", "message_id"):
+            scalar = _coerce_scalar(raw_update.get(key))
+            if scalar is not None or raw_update.get(key) is None:
+                if key in raw_update:
+                    update_summary[key] = scalar
+        omitted_keys = [str(key) for key in raw_update.keys() if key not in update_summary]
+        if omitted_keys:
+            update_summary["omitted_keys"] = omitted_keys[:20]
+    update_summary["truncated"] = True
+
+    truncated = {
+        "run_id": payload.get("run_id"),
+        "session_id": payload.get("session_id"),
+        "update": update_summary,
+        "truncated": True,
+        "original_size_bytes": original_size_bytes,
+    }
+    return _fit_payload_within_limit(
+        "run.session_update",
+        truncated,
+        max_payload_bytes=max_payload_bytes,
+        original_size_bytes=original_size_bytes,
+    )
 
 
 def _normalize_prompt_items(prompt_items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -133,24 +227,105 @@ class RuntimeRun:
     executor_id: str | None = None
     error_code: str | None = None
     error_message: str | None = None
+    terminal_at: str | None = None
+
+
+@dataclass(slots=True)
+class RemoteTranscriptCache:
+    items: list[dict[str, Any]]
+    cached_at: str
+    payload_bytes: int
+    remote_updated_at: str | None = None
 
 
 class RuntimeState:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        max_events_per_run: int = 2000,
+        max_event_payload_bytes: int = 256_000,
+        completed_run_ttl_seconds: int = 6 * 3600,
+        max_local_runs_per_session: int = 20,
+        remote_transcript_ttl_seconds: int | None = None,
+    ) -> None:
         self._lock = threading.RLock()
         self._sessions: dict[str, dict[str, Any]] = {}
         self._daemon_sessions: dict[str, set[str]] = defaultdict(set)
         self._runs: dict[str, RuntimeRun] = {}
         self._queued_runs: list[str] = []
         self._run_events: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        self._run_event_seq: dict[str, int] = defaultdict(int)
         self._permission_requests: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
-        self._remote_transcript_items: dict[str, list[dict[str, Any]]] = {}
+        self._remote_transcript_items: dict[str, RemoteTranscriptCache] = {}
+        self._max_events_per_run = max(1, int(max_events_per_run))
+        self._max_event_payload_bytes = max(1, int(max_event_payload_bytes))
+        self._completed_run_ttl_seconds = max(1, int(completed_run_ttl_seconds))
+        self._max_local_runs_per_session = max(1, int(max_local_runs_per_session))
+        self._remote_transcript_ttl_seconds = max(
+            1,
+            int(remote_transcript_ttl_seconds or completed_run_ttl_seconds),
+        )
 
     def _session_has_active_run_locked(self, session_id: str) -> bool:
         return any(
             run.session_id == session_id and run.status in ACTIVE_RUN_STATUSES
             for run in self._runs.values()
         )
+
+    def _session_has_local_run_locked(self, session_id: str) -> bool:
+        return any(run.session_id == session_id for run in self._runs.values())
+
+    def _mark_run_terminal_locked(self, run: RuntimeRun, next_status: str) -> None:
+        terminal_at = utc_now()
+        run.status = next_status
+        run.updated_at = terminal_at
+        run.terminal_at = terminal_at
+
+    def _remove_run_locked(self, run_id: str) -> None:
+        self._runs.pop(run_id, None)
+        self._run_events.pop(run_id, None)
+        self._run_event_seq.pop(run_id, None)
+        self._permission_requests.pop(run_id, None)
+        while run_id in self._queued_runs:
+            with contextlib.suppress(ValueError):
+                self._queued_runs.remove(run_id)
+
+    def _prune_session_runs_locked(self, session_id: str) -> None:
+        terminal_runs = [
+            run
+            for run in self._runs.values()
+            if run.session_id == session_id and run.status in TERMINAL_RUN_STATUSES
+        ]
+        if len(terminal_runs) <= self._max_local_runs_per_session:
+            return
+        terminal_runs.sort(key=lambda run: (_parse_timestamp(run.updated_at), run.run_id), reverse=True)
+        for stale in terminal_runs[self._max_local_runs_per_session :]:
+            self._remove_run_locked(stale.run_id)
+
+    def _normalized_event_payload_locked(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        original_size_bytes = _json_size_bytes(payload)
+        if original_size_bytes <= self._max_event_payload_bytes:
+            return dict(payload)
+        if event_type in TRUNCATABLE_EVENT_TYPES:
+            return _truncate_session_update_payload(
+                payload,
+                max_payload_bytes=self._max_event_payload_bytes,
+                original_size_bytes=original_size_bytes,
+            )
+        return _fit_payload_within_limit(
+            event_type,
+            payload,
+            max_payload_bytes=self._max_event_payload_bytes,
+            original_size_bytes=original_size_bytes,
+        )
+
+    def _prune_run_events_locked(self, run_id: str) -> None:
+        events = self._run_events.get(run_id)
+        if not events:
+            return
+        overflow = len(events) - self._max_events_per_run
+        if overflow > 0:
+            del events[:overflow]
 
     def upsert_session(
         self,
@@ -224,11 +399,12 @@ class RuntimeState:
             known = set(self._daemon_sessions.get(daemon_id, set()))
             stale_ids = known - seen_ids
             for session_id in stale_ids:
-                if self._session_has_active_run_locked(session_id):
+                if self._session_has_local_run_locked(session_id):
                     continue
                 session = self._sessions.get(session_id)
                 if session and session.get("daemon_id") == daemon_id:
                     self._sessions.pop(session_id, None)
+                self._remote_transcript_items.pop(session_id, None)
             self._daemon_sessions[daemon_id] = seen_ids
 
     def get_session(self, session_id: str) -> dict[str, Any] | None:
@@ -322,6 +498,7 @@ class RuntimeState:
         with self._lock:
             self._runs[run_id] = run
             self._queued_runs.append(run_id)
+            self._remote_transcript_items.pop(session_id, None)
             session = self._sessions.get(session_id)
             if session is not None:
                 session["status"] = "queued"
@@ -386,6 +563,7 @@ class RuntimeState:
                 return None
             run.status = "assigned"
             run.executor_id = executor_id
+            run.terminal_at = None
             run.updated_at = utc_now()
             session = self._sessions.get(run.session_id)
             if session is not None:
@@ -401,6 +579,7 @@ class RuntimeState:
                 return None
             run.status = "running"
             run.executor_id = executor_id
+            run.terminal_at = None
             run.updated_at = utc_now()
             session = self._sessions.get(session_id)
             if session is not None:
@@ -415,13 +594,13 @@ class RuntimeState:
             run = self._runs.get(run_id)
             if run is None:
                 return None
-            run.status = next_status
-            run.updated_at = utc_now()
+            self._mark_run_terminal_locked(run, next_status)
             session = self._sessions.get(run.session_id)
             if session is not None:
                 session["status"] = "idle"
                 session["executor_id"] = None
                 session["updated_at"] = run.updated_at
+            self._prune_session_runs_locked(run.session_id)
             return self._serialize_run_locked(run)
 
     def mark_run_failed(self, run_id: str, *, error_code: str, error_message: str) -> dict[str, Any] | None:
@@ -429,15 +608,15 @@ class RuntimeState:
             run = self._runs.get(run_id)
             if run is None:
                 return None
-            run.status = "failed"
+            self._mark_run_terminal_locked(run, "failed")
             run.error_code = error_code
             run.error_message = error_message
-            run.updated_at = utc_now()
             session = self._sessions.get(run.session_id)
             if session is not None:
                 session["status"] = "idle"
                 session["executor_id"] = None
                 session["updated_at"] = run.updated_at
+            self._prune_session_runs_locked(run.session_id)
             return self._serialize_run_locked(run)
 
     def mark_run_cancelled(self, run_id: str) -> dict[str, Any] | None:
@@ -445,13 +624,13 @@ class RuntimeState:
             run = self._runs.get(run_id)
             if run is None:
                 return None
-            run.status = "cancelled"
-            run.updated_at = utc_now()
+            self._mark_run_terminal_locked(run, "cancelled")
             session = self._sessions.get(run.session_id)
             if session is not None:
                 session["status"] = "idle"
                 session["executor_id"] = None
                 session["updated_at"] = run.updated_at
+            self._prune_session_runs_locked(run.session_id)
             return self._serialize_run_locked(run)
 
     def mark_run_executor_disconnected(self, run_id: str) -> dict[str, Any] | None:
@@ -459,28 +638,30 @@ class RuntimeState:
             run = self._runs.get(run_id)
             if run is None:
                 return None
-            run.status = "executor_disconnected"
-            run.updated_at = utc_now()
+            self._mark_run_terminal_locked(run, "executor_disconnected")
             session = self._sessions.get(run.session_id)
             if session is not None:
                 session["status"] = "idle"
                 session["executor_id"] = None
                 session["updated_at"] = run.updated_at
+            self._prune_session_runs_locked(run.session_id)
             return self._serialize_run_locked(run)
 
     def store_run_event(self, run_id: str, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         now = utc_now()
         with self._lock:
-            seq = len(self._run_events[run_id]) + 1
+            self._run_event_seq[run_id] += 1
+            seq = self._run_event_seq[run_id]
             row = {
                 "event_id": new_id(),
                 "run_id": run_id,
                 "seq": seq,
                 "event_type": event_type,
-                "payload": dict(payload),
+                "payload": self._normalized_event_payload_locked(event_type, payload),
                 "created_at": now,
             }
             self._run_events[run_id].append(row)
+            self._prune_run_events_locked(run_id)
             return dict(row)
 
     def list_run_events(self, run_id: str) -> list[dict[str, Any]]:
@@ -555,13 +736,18 @@ class RuntimeState:
         if not session_updates:
             return
         with self._lock:
-            has_local_runs = any(run.session_id == session_id for run in self._runs.values())
-            if has_local_runs:
+            if self._session_has_local_run_locked(session_id):
                 return
-            self._remote_transcript_items[session_id] = build_synced_session_transcript_items(
+            items = build_synced_session_transcript_items(
                 session_id=session_id,
                 remote_updated_at=remote_updated_at,
                 session_updates=session_updates,
+            )
+            self._remote_transcript_items[session_id] = RemoteTranscriptCache(
+                items=items,
+                cached_at=utc_now(),
+                payload_bytes=_json_size_bytes(session_updates),
+                remote_updated_at=remote_updated_at,
             )
 
     def build_session_transcript(self, session_id: str) -> list[dict[str, Any]]:
@@ -575,7 +761,8 @@ class RuntimeState:
                 run.run_id: [dict(item) for item in self._permission_requests.get(run.run_id, {}).values()]
                 for run in runs
             }
-            remote_items = [dict(item) for item in self._remote_transcript_items.get(session_id, [])]
+            remote_entry = self._remote_transcript_items.get(session_id)
+            remote_items = [dict(item) for item in (remote_entry.items if remote_entry else [])]
 
         runs.sort(key=lambda item: (item.created_at, item.run_id))
         items: list[dict[str, Any]] = list(remote_items)
@@ -624,3 +811,49 @@ class RuntimeState:
             )
         )
         return items
+
+    def cleanup(self, *, now: datetime | None = None) -> dict[str, int]:
+        current = now or datetime.now(UTC)
+        ttl_cutoff = current - timedelta(seconds=self._completed_run_ttl_seconds)
+        remote_cutoff = current - timedelta(seconds=self._remote_transcript_ttl_seconds)
+        removed_runs = 0
+        removed_remote_sessions = 0
+
+        with self._lock:
+            expired_runs = [
+                run_id
+                for run_id, run in self._runs.items()
+                if run.status in TERMINAL_RUN_STATUSES
+                and run.terminal_at is not None
+                and _parse_timestamp(run.terminal_at) <= ttl_cutoff
+            ]
+            for run_id in expired_runs:
+                self._remove_run_locked(run_id)
+                removed_runs += 1
+
+            for session_id in {run.session_id for run in self._runs.values()}:
+                before = len(self._runs)
+                self._prune_session_runs_locked(session_id)
+                removed_runs += before - len(self._runs)
+
+            for run_id in [run_id for run_id in list(self._run_events) if run_id not in self._runs]:
+                self._run_events.pop(run_id, None)
+                self._run_event_seq.pop(run_id, None)
+            for run_id in [run_id for run_id in list(self._permission_requests) if run_id not in self._runs]:
+                self._permission_requests.pop(run_id, None)
+
+            stale_remote_sessions = [
+                session_id
+                for session_id, cache in self._remote_transcript_items.items()
+                if session_id not in self._sessions
+                or self._session_has_local_run_locked(session_id)
+                or _parse_timestamp(cache.cached_at) <= remote_cutoff
+            ]
+            for session_id in stale_remote_sessions:
+                self._remote_transcript_items.pop(session_id, None)
+                removed_remote_sessions += 1
+
+        return {
+            "removed_runs": removed_runs,
+            "removed_remote_sessions": removed_remote_sessions,
+        }

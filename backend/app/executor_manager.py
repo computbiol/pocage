@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -38,6 +40,17 @@ from .security import hash_secret, utcnow
 logger = logging.getLogger(__name__)
 
 
+def _json_size_bytes(value: Any) -> int:
+    try:
+        return len(json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
+    except Exception:
+        return len(str(value).encode("utf-8", errors="replace"))
+
+
+class DaemonProtocolViolation(RuntimeError):
+    pass
+
+
 @dataclass(slots=True)
 class ExecutorSession:
     daemon_id: str
@@ -58,6 +71,10 @@ class ExecutorManager:
         runtime: RuntimeState,
         broker: EventBroker,
         session_factory: async_sessionmaker[AsyncSession] | None = None,
+        *,
+        max_session_update_bytes: int = 256_000,
+        max_run_stream_bytes: int = 8_000_000,
+        max_session_sync_bytes: int = 4_000_000,
     ) -> None:
         self._runtime = runtime
         self._broker = broker
@@ -68,7 +85,50 @@ class ExecutorManager:
         self._session_list_waiters: dict[tuple[str, str], asyncio.Future[dict[str, Any]]] = {}
         self._session_sync_waiters: dict[tuple[str, str], asyncio.Future[dict[str, Any]]] = {}
         self._session_sync_inflight: dict[str, asyncio.Task[dict[str, Any]]] = {}
+        self._run_stream_bytes: dict[str, int] = defaultdict(int)
+        self._max_session_update_bytes = max(1, int(max_session_update_bytes))
+        self._max_run_stream_bytes = max(1, int(max_run_stream_bytes))
+        self._max_session_sync_bytes = max(1, int(max_session_sync_bytes))
         self._lock = asyncio.Lock()
+
+    def _clear_run_stream_tracking(self, run_id: str) -> None:
+        self._run_stream_bytes.pop(run_id, None)
+
+    def _record_run_stream_bytes(self, run_id: str, raw_message_bytes: int | None) -> int:
+        if raw_message_bytes is None or raw_message_bytes <= 0:
+            return self._run_stream_bytes.get(run_id, 0)
+        self._run_stream_bytes[run_id] += raw_message_bytes
+        return self._run_stream_bytes[run_id]
+
+    async def _mark_run_protocol_failed(
+        self,
+        session: ExecutorSession,
+        *,
+        run_id: str,
+        error_code: str,
+        error_message: str,
+    ) -> None:
+        self._runtime.mark_run_failed(
+            run_id,
+            error_code=error_code,
+            error_message=error_message,
+        )
+        run_event = self._runtime.store_run_event(
+            run_id,
+            "run.error",
+            {
+                "run_id": run_id,
+                "error_code": error_code,
+                "error_message": error_message,
+            },
+        )
+        await self._broker.publish(
+            run_id,
+            StreamEvent(event_type=run_event["event_type"], payload=run_event),
+        )
+        self._clear_run_stream_tracking(run_id)
+        if session.busy_run_id == run_id:
+            session.busy_run_id = None
 
     async def register(
         self,
@@ -143,6 +203,7 @@ class ExecutorManager:
                 session.busy_run_id,
                 StreamEvent(event_type=event["event_type"], payload=event),
             )
+            self._clear_run_stream_tracking(session.busy_run_id)
 
     def _fail_context_search_waiters(self, daemon_id: str, error_message: str) -> None:
         targets = [key for key in self._context_search_waiters if key[0] == daemon_id]
@@ -489,6 +550,7 @@ class ExecutorManager:
 
                 self._runtime.mark_run_assigned(run["run_id"], executor_id=session.daemon_id)
                 session.busy_run_id = run["run_id"]
+                self._run_stream_bytes.setdefault(run["run_id"], 0)
                 started = self._runtime.store_run_event(
                     run["run_id"],
                     "run.started",
@@ -685,9 +747,28 @@ class ExecutorManager:
                 )
             await session.commit()
 
-    async def handle_executor_event(self, session: ExecutorSession, payload: dict[str, Any]) -> None:
+    async def handle_executor_event(
+        self,
+        session: ExecutorSession,
+        payload: dict[str, Any],
+        *,
+        raw_message_bytes: int | None = None,
+    ) -> None:
         event_type = payload.get("type")
         logger.info("daemon event from %s: %s", session.daemon_id, event_type)
+        raw_run_id = payload.get("run_id")
+        if isinstance(raw_run_id, str) and raw_run_id.strip():
+            total_bytes = self._record_run_stream_bytes(raw_run_id.strip(), raw_message_bytes)
+            if total_bytes > self._max_run_stream_bytes:
+                error_message = f"Run stream exceeded {self._max_run_stream_bytes} bytes"
+                await self._mark_run_protocol_failed(
+                    session,
+                    run_id=raw_run_id.strip(),
+                    error_code="run_stream_too_large",
+                    error_message=error_message,
+                )
+                raise DaemonProtocolViolation(error_message)
+
         if event_type == "heartbeat":
             HeartbeatEvent(**payload)
             await self._mark_agent_seen(session)
@@ -742,6 +823,14 @@ class ExecutorManager:
             return
 
         if event_type == "session.sync.result":
+            session_updates_payload = payload.get("session_updates")
+            if _json_size_bytes(session_updates_payload) > self._max_session_sync_bytes:
+                request_id = self._coerce_required_str(payload.get("request_id"), field_name="request_id")
+                key = (session.daemon_id, request_id)
+                future = self._session_sync_waiters.pop(key, None)
+                if future is not None and not future.done():
+                    future.set_exception(RuntimeError("session sync payload exceeded max size"))
+                return
             event = SessionSyncResultPayload(**payload)
             key = (session.daemon_id, event.request_id)
             future = self._session_sync_waiters.pop(key, None)
@@ -804,6 +893,17 @@ class ExecutorManager:
             return
 
         if event_type == "run.session_update":
+            update_bytes = _json_size_bytes(payload.get("update"))
+            if update_bytes > self._max_session_update_bytes:
+                run_id = self._coerce_required_str(payload.get("run_id"), field_name="run_id")
+                error_message = f"Session update exceeded {self._max_session_update_bytes} bytes"
+                await self._mark_run_protocol_failed(
+                    session,
+                    run_id=run_id,
+                    error_code="session_update_too_large",
+                    error_message=error_message,
+                )
+                raise DaemonProtocolViolation(error_message)
             event = RunSessionUpdateEvent(**payload)
             run_event = self._runtime.store_run_event(
                 event.run_id,
@@ -866,6 +966,7 @@ class ExecutorManager:
                 run_id,
                 StreamEvent(event_type=run_event["event_type"], payload=run_event),
             )
+            self._clear_run_stream_tracking(run_id)
             if session.busy_run_id == run_id:
                 session.busy_run_id = None
             await self.dispatch_pending()
@@ -893,6 +994,7 @@ class ExecutorManager:
                 run_id,
                 StreamEvent(event_type=run_event["event_type"], payload=run_event),
             )
+            self._clear_run_stream_tracking(run_id)
             if session.busy_run_id == run_id:
                 session.busy_run_id = None
             await self.dispatch_pending()
@@ -921,6 +1023,7 @@ class ExecutorManager:
                 run_id,
                 StreamEvent(event_type=run_event["event_type"], payload=run_event),
             )
+            self._clear_run_stream_tracking(run_id)
             return "cancelled"
 
         executor_id = run.get("executor_id")
