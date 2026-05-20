@@ -184,7 +184,7 @@ class ExecutorManagerTests(unittest.IsolatedAsyncioTestCase):
             agent_instance_id="agent-1",
             daemon_id="daemon-1",
             name="codex@test",
-            version="0.1.0",
+            version="0.1.1",
             agent="codex",
             hostname="test-host",
             workspace_roots=["/tmp/ws"],

@@ -24,7 +24,7 @@ def _pair_settings() -> PairSettings:
         hostname="test-host",
         platform="darwin",
         arch="arm64",
-        version="0.1.0",
+        version="0.1.1",
         workspace_roots=["/tmp/ws"],
         agent_command_path="/usr/local/bin/codex-acp",
         heartbeat_interval_sec=20,

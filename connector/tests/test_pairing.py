@@ -22,7 +22,7 @@ def _pair_settings() -> PairSettings:
         hostname="test-host",
         platform="darwin",
         arch="arm64",
-        version="0.1.0",
+        version="0.1.1",
         workspace_roots=["/tmp/ws"],
         agent_command_path="/usr/local/bin/codex-acp",
         heartbeat_interval_sec=20,
@@ -39,11 +39,11 @@ class PairingHttpTests(unittest.TestCase):
         _post_json(
             "https://pocage.toce.ai/api/daemon/pair",
             {"pairing_code": "pair_test"},
-            version="0.1.0",
+            version="0.1.1",
         )
 
         req = mock_urlopen.call_args.args[0]
-        self.assertEqual(req.headers["User-agent"], "pocage-cli/0.1.0")
+        self.assertEqual(req.headers["User-agent"], "pocage-cli/0.1.1")
 
 
 if __name__ == "__main__":

@@ -205,7 +205,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title=settings.app_name,
-        version="0.1.0",
+        version="0.1.1",
         docs_url=f"{settings.api_prefix}/docs",
         openapi_url=f"{settings.api_prefix}/openapi.json",
         lifespan=lifespan,

@@ -94,7 +94,7 @@ class PocageExecutor:
         async with websockets.connect(
             self._settings.ws_url,
             additional_headers=headers,
-            user_agent_header=client_user_agent("0.1.0"),
+            user_agent_header=client_user_agent("0.1.1"),
         ) as ws:
             self._current_ws = ws
             for raw_root in self._settings.workspace_roots:
@@ -106,7 +106,7 @@ class PocageExecutor:
                 "agent_instance_id": self._settings.agent_instance_id,
                 "daemon_id": self._settings.daemon_id,
                 "name": self._settings.executor_name,
-                "version": "0.1.0",
+                "version": "0.1.1",
                 "agent": self._settings.agent,
                 "hostname": socket.gethostname(),
                 "workspace_roots": self._settings.workspace_roots,

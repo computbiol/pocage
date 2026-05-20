@@ -389,7 +389,7 @@ class AcpProcessClient:
         response = await conn.initialize(
             protocol_version=PROTOCOL_VERSION,
             client_capabilities=ClientCapabilities(),
-            client_info=Implementation(name="pocage", title="Pocket Agent", version="0.1.0"),
+            client_info=Implementation(name="pocage", title="Pocket Agent", version="0.1.1"),
         )
         payload = _model_dump(response)
         await self._adapter.authenticate(conn, payload)

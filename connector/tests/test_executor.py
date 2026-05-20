@@ -205,7 +205,7 @@ class PocageExecutorConnectionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         mock_connect.assert_called_once_with(
             executor._settings.ws_url,
             additional_headers={"Authorization": f"Bearer {executor._settings.machine_token}"},
-            user_agent_header="pocage-cli/0.1.0",
+            user_agent_header="pocage-cli/0.1.1",
         )
 
 

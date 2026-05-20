@@ -1,6 +1,6 @@
 [project]
 name = "pocage"
-version = "0.1.0"
+version = "0.1.1"
 description = "Pocket Agent local daemon for pairing your machine and continuing AI coding sessions from the browser."
 readme = "README.md"
 requires-python = ">=3.11"

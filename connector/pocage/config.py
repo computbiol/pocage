@@ -62,7 +62,7 @@ ParsedSettings = PairSettings | RunSettings
 
 
 def client_user_agent(version: str) -> str:
-    normalized = version.strip() or "0.1.0"
+    normalized = version.strip() or "0.1.1"
     return f"pocage-cli/{normalized}"
 
 
@@ -210,7 +210,7 @@ def _parse_pair_args(argv: list[str]) -> PairSettings:
     )
     parser.add_argument(
         "--version",
-        default="0.1.0",
+        default="0.1.1",
         help="Daemon version reported to the control plane",
     )
     parser.add_argument(

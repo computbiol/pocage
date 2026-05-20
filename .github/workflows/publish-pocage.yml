@@ -5,12 +5,12 @@ name: Publish pocage to PyPI
 # - Repository: pocage
 # - Workflow file: .github/workflows/publish-pocage.yml
 # - GitHub environment: pypi
-# Release tags must use the form: pocage-v<version>
+# Release tags must use the form: v<version>
 
 on:
   push:
     tags:
-      - "pocage-v*"
+      - "v*"
 
 permissions:
   contents: read
@@ -51,7 +51,7 @@ jobs:
           PY
           )"
 
-          expected_tag="pocage-v${package_version}"
+          expected_tag="v${package_version}"
           if [[ "${GITHUB_REF_NAME}" != "${expected_tag}" ]]; then
             echo "Tag ${GITHUB_REF_NAME} does not match package version ${package_version}."
             echo "Expected tag: ${expected_tag}"
