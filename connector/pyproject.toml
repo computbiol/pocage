@@ -1,8 +1,8 @@
 [project]
 name = "pocage"
 version = "0.1.1"
-description = "Pocket Agent local daemon for pairing your machine and continuing AI coding sessions from the browser."
-readme = "README.md"
+description = "Local daemon for Pocket Agent that pairs your machine and runs AI coding sessions locally."
+readme = "README.pypi.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
